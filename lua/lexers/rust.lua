@@ -8,7 +8,8 @@ local P, R, S = lpeg.P, lpeg.R, lpeg.S
 local M = {_NAME = 'rust'}
 
 -- Whitespace.
-local ws = token(l.WHITESPACE, l.space^1)
+local unicode_whitespace = '\xc2\x85\xe2\x80\x8e\xe2\x80\x8f\xe2\x80\xa8\xe2\x80\xa9'
+local ws = token(l.WHITESPACE, (l.space+unicode_whitespace)^1)
 
 -- Comments.
 local line_comment = '//' * l.nonnewline_esc^0
@@ -16,28 +17,49 @@ local block_comment = '/*' * (l.any - '*/')^0 * P('*/')^-1
 local comment = token(l.COMMENT, line_comment + block_comment)
 
 -- Strings.
-local sq_str = P('L')^-1 * l.delimited_range("'")
-local dq_str = P('L')^-1 * l.delimited_range('"')
-local raw_str =  '#"' * (l.any - '#')^0 * P('#')^-1
-local string = token(l.STRING, dq_str + raw_str)
+local char_escape = P'\\' * ( P'n' + P'r' + P't' + P'\\' + P'0' +
+  P'"' + P"'" + (P'x' * R'07' * l.xdigit) + (P'u{' * (l.xdigit + P'_')^1 * P'}'))
+local char_lit = P"'" * (P(1) + char_escape) * P"'")
+local str_lit = P('b')^-1 * l.delimited_range('"')
+local raw_start = 'r#' * lpeg.Cg(P'#'^0), 'raw_s')
+local raw_end = lpeg.C(P'#'^0) * '#'
+local raw_end_eq = lpeg.Cmt(raw_end * lpeg.Cb('raw_s'), function(s, i, a, b)
+  return a == b
+end)
+local raw_str =  P'b'^-1 * raw_start * (l.any - raw_end_eq)^0 * raw_end
+local string = token(l.STRING, char_lit + str_lit + raw_str)
 
 -- Numbers.
-local number = token(l.NUMBER, l.float + (l.dec_num + "_")^1 +
-                     "0b" * (l.dec_num + "_")^1 + l.integer)
+function integer_base(c, digit)
+  return P'0' * c * digit * (digit + P'_')^0
+end
+local integer_suffix = word_match{
+  'u8', 'u16', 'u32', 'u64', 'u128', 'usize',
+  'i8', 'i16', 'i32', 'i64', 'i128', 'isize'
+}
+local dec_literal = l.digit * (l.digit + '_')^0
+local integer = (dec_literal +
+                     integer_base('b', R('01')) +
+                     integer_base('o', R('07')) +
+                     integer_base('x', l.xdigit)) * integer_suffix
+local float_exp = S'eE' * S'+-'^-1 * dec_literal
+local float = (dec_literal * '.' * -(S'._' + identifier)) +
+  (dec_literal * (P'.' dec_literal)^-1 * float_exp^-1 * word_match{'f32', 'f64'}^-1)
+local number = token(l.NUMBER, float + integer)
 
 -- Keywords.
 local keyword = token(l.KEYWORD, word_match{
-  'abstract',   'alignof',    'as',       'become',   'box',
-  'break',      'const',      'continue', 'crate',    'do',
-  'else',       'enum',       'extern',   'false',    'final',
-  'fn',         'for',        'if',       'impl',     'in',
-  'let',        'loop',       'macro',    'match',    'mod',
-  'move',       'mut',        "offsetof", 'override', 'priv',
-  'proc',       'pub',        'pure',     'ref',      'return',
-  'Self',       'self',       'sizeof',   'static',   'struct',
-  'super',      'trait',      'true',     'type',     'typeof',
-  'unsafe',     'unsized',    'use',      'virtual',  'where',
-  'while',      'yield'
+  'abstract',  'as',       'async',   'await',     'become',
+  'box',       'break',    'const',   'continue',  'crate',
+  'do',        'dyn',      'else',    'enum',      'extern',
+  'false',     'final',    'fn',      'for',       'if',
+  'impl',      'in',       'let',     'loop',      'macro',
+  'match',     'mod',      'move',    'mut',       'override',
+  'priv',      'pub',      'ref',     'return',    'Self',
+  'self',      'static',   'struct',  'super',     'trait',
+  'true',      'try',      'type',    'typeof',    'union',
+  'unsafe',    'unsized',  'use',     'virtual',   'where',
+  'while',     'yield'
 })
 
 -- Library types
@@ -56,7 +78,9 @@ local type = token(l.TYPE, word_match{
 })
 
 -- Identifiers.
-local identifier = token(l.IDENTIFIER, l.word)
+local raw_dientifier = P'r#' * l.word
+local identifier = token(l.IDENTIFIER, l.word + raw_identifier)
+local lifetime = token('lifetime', P"'" * identifier)
 
 -- Operators.
 local operator = token(l.OPERATOR, S('+-/*%<>!=`^~@&|?#~:;,.()[]{}'))
@@ -73,10 +97,15 @@ M._rules = {
   {'type', type},
   {'identifier', identifier},
   {'string', string},
+  {'lifetime', lifetime},
   {'comment', comment},
   {'number', number},
   {'operator', operator},
   {'preprocessor', attribute},
+}
+
+M._tokenstyles = {
+  lifetime = l.STYLE_TYPE,
 }
 
 M._foldsymbols = {
